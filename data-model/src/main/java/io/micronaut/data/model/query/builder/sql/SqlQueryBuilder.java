@@ -58,6 +58,7 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.StringJoiner;
@@ -543,17 +544,22 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
 
     @NonNull
     private List<String> resolveJoinTableJoinColumns(Association association, PersistentEntity entity, NamingStrategy namingStrategy) {
-        Optional<Association> inverse = association.getInverseSide().map(Function.identity());
-        boolean isOwner = !inverse.isPresent();
-        AnnotationValue<Annotation> joinTable = inverse.orElse(association).getAnnotationMetadata().getAnnotation(ANN_JOIN_TABLE);
-        if (joinTable != null) {
-            List<String> joinColumns = joinTable.getAnnotations(isOwner ? "joinColumns" : "inverseJoinColumns")
-                    .stream()
-                    .map(ann -> ann.stringValue("name").orElse(null))
-                    .collect(Collectors.toList());
-            if (!joinColumns.isEmpty()) {
-                return joinColumns;
-            }
+        List<String> joinColumns = getJoinedColumns(association, "name");
+        if (!joinColumns.isEmpty()) {
+            return joinColumns;
+        }
+        List<String> columns = new ArrayList<>();
+        traversePersistentProperties(entity.getIdentity(), (associations, property) -> {
+            columns.add(namingStrategy.mappedName(associations, property));
+        });
+        return columns;
+    }
+
+    @NonNull
+    private List<String> resolveJoinTableAssociatedColumns(Association association, PersistentEntity entity, NamingStrategy namingStrategy) {
+        List<String> joinColumns = getJoinedColumns(association, "referencedColumnName");
+        if (!joinColumns.isEmpty()) {
+            return joinColumns;
         }
         PersistentProperty identity = entity.getIdentity();
         if (identity == null) {
@@ -565,6 +571,21 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
             columns.add(columnName);
         });
         return columns;
+    }
+
+    @NonNull
+    private List<String> getJoinedColumns(Association association, String columnType) {
+        Optional<Association> inverse = association.getInverseSide().map(Function.identity());
+        boolean isOwner = !inverse.isPresent();
+        AnnotationValue<Annotation> joinTable = inverse.orElse(association).getAnnotationMetadata().getAnnotation(ANN_JOIN_TABLE);
+        if (joinTable != null) {
+            return joinTable.getAnnotations(isOwner ? "joinColumns" : "inverseJoinColumns")
+                    .stream()
+                    .map(ann -> ann.stringValue(columnType).orElse(null))
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+        }
+        return Collections.emptyList();
     }
 
     @NonNull
@@ -1048,29 +1069,15 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                     if (associatedId == null) {
                         throw new MappingException("Cannot join on entity [" + associationOwner.getName() + "] that has no declared ID");
                     }
-
                     NamingStrategy namingStrategy = associationOwner.getNamingStrategy();
-
-                    List<String> ownerJoinColumns = new ArrayList<>();
-                    traversePersistentProperties(associationOwner.getIdentity(), (associations, property) -> {
-                        String columnName = associationOwner.getNamingStrategy().mappedName(associations, property);
-                        if (escape) {
-                            columnName = quote(columnName);
-                        }
-                        ownerJoinColumns.add(columnName);
-                    });
-                    List<String> associationJoinColumns = new ArrayList<>();
-                    traversePersistentProperties(associatedEntity.getIdentity(), (associations, property) -> {
-                        String columnName = associatedEntity.getNamingStrategy().mappedName(associations, property);
-                        if (escape) {
-                            columnName = quote(columnName);
-                        }
-                        associationJoinColumns.add(columnName);
-                    });
-                    List<String> ownerJoinTableColumns = resolveJoinTableJoinColumns(association, associationOwner, namingStrategy);
-                    List<String> associationJoinTableColumns = resolveJoinTableJoinColumns(association, associatedEntity, namingStrategy);
+                    List<String> ownerJoinColumns = resolveJoinTableJoinColumns(association, associationOwner, namingStrategy);
+                    List<String> ownerJoinTableColumns = resolveJoinTableAssociatedColumns(association, associationOwner, namingStrategy);
+                    List<String> associationJoinColumns = resolveJoinTableJoinColumns(association, associatedEntity, namingStrategy);
+                    List<String> associationJoinTableColumns = resolveJoinTableAssociatedColumns(association, associatedEntity, namingStrategy);
                     if (escape) {
+                        ownerJoinColumns = ownerJoinColumns.stream().map(this::quote).collect(Collectors.toList());
                         ownerJoinTableColumns = ownerJoinTableColumns.stream().map(this::quote).collect(Collectors.toList());
+                        associationJoinColumns = associationJoinColumns.stream().map(this::quote).collect(Collectors.toList());
                         associationJoinTableColumns = associationJoinTableColumns.stream().map(this::quote).collect(Collectors.toList());
                     }
                     String joinTableName = association.getAnnotationMetadata()
