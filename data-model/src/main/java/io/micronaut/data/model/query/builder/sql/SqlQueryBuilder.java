@@ -62,6 +62,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.StringJoiner;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -88,6 +89,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
      * Annotation used to represent join tables.
      */
     private static final String ANN_JOIN_TABLE = "io.micronaut.data.jdbc.annotation.JoinTable";
+    private static final String ANN_JOIN_COLUMNS = "io.micronaut.data.jdbc.annotation.JoinColumns";
     private static final String BLANK_SPACE = " ";
     private static final String SEQ_SUFFIX = "_seq";
     private static final String INSERT_INTO = "INSERT INTO ";
@@ -187,7 +189,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
      * @return The table
      */
     @Experimental
-    public @NonNull String buildBatchCreateTableStatement (@NonNull PersistentEntity... entities) {
+    public @NonNull String buildBatchCreateTableStatement(@NonNull PersistentEntity... entities) {
         return Arrays.stream(entities).flatMap(entity -> Stream.of(buildCreateTableStatements(entity)))
                 .collect(Collectors.joining(System.getProperty("line.separator")));
     }
@@ -200,7 +202,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
      * @return The table
      */
     @Experimental
-    public @NonNull String buildBatchDropTableStatement (@NonNull PersistentEntity... entities) {
+    public @NonNull String buildBatchDropTableStatement(@NonNull PersistentEntity... entities) {
         return Arrays.stream(entities).flatMap(entity -> Stream.of(buildDropTableStatements(entity)))
                 .collect(Collectors.joining("\n"));
     }
@@ -457,15 +459,6 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
         return true;
     }
 
-    private boolean isOptional(List<Association> associations) {
-        for (Association association : associations) {
-            if (!association.isRequired()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     @Override
     protected String getTableAsKeyword() {
         return BLANK_SPACE;
@@ -549,7 +542,19 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
     }
 
     @NonNull
-    private List<String> resolveJoinTableJoinColumns(Association owningAssociation, PersistentEntity entity, NamingStrategy namingStrategy) {
+    private List<String> resolveJoinTableJoinColumns(Association association, PersistentEntity entity, NamingStrategy namingStrategy) {
+        Optional<Association> inverse = association.getInverseSide().map(Function.identity());
+        boolean isOwner = !inverse.isPresent();
+        AnnotationValue<Annotation> joinTable = inverse.orElse(association).getAnnotationMetadata().getAnnotation(ANN_JOIN_TABLE);
+        if (joinTable != null) {
+            List<String> joinColumns = joinTable.getAnnotations(isOwner ? "joinColumns" : "inverseJoinColumns")
+                    .stream()
+                    .map(ann -> ann.stringValue("name").orElse(null))
+                    .collect(Collectors.toList());
+            if (!joinColumns.isEmpty()) {
+                return joinColumns;
+            }
+        }
         PersistentProperty identity = entity.getIdentity();
         if (identity == null) {
             throw new MappingException("Cannot have a foreign key association without an ID on entity: " + entity.getName());
@@ -560,44 +565,6 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
             columns.add(columnName);
         });
         return columns;
-    }
-
-    @NonNull
-    private String[] resolveJoinTableColumns(@NonNull PersistentEntity entity,
-                                             PersistentEntity associatedEntity,
-                                             Association association,
-                                             PersistentProperty identity,
-                                             PersistentProperty associatedId,
-                                             NamingStrategy namingStrategy) {
-        List<AnnotationValue<MappedProperty>> joinColumns = association.getAnnotationMetadata().findAnnotation(ANN_JOIN_TABLE)
-                .map(av -> av.getAnnotations("joinColumns", MappedProperty.class)).orElse(Collections.emptyList());
-        if (identity == null) {
-            throw new MappingException("Cannot have a foreign key association without an ID on entity: " + entity.getName());
-        }
-        if (associatedId == null) {
-            throw new MappingException("Cannot have a foreign key association without an ID on entity: " + associatedEntity.getName());
-        }
-        String[] joinColumnDefinitions;
-        if (CollectionUtils.isEmpty(joinColumns)) {
-
-            String thisName = namingStrategy.mappedName(entity.getDecapitalizedName() + namingStrategy.getForeignKeySuffix());
-            String thatName = namingStrategy.mappedName(associatedEntity.getDecapitalizedName() + namingStrategy.getForeignKeySuffix());
-            joinColumnDefinitions = new String[] { thisName, thatName };
-
-        } else {
-            if (joinColumns.size() != 2) {
-                throw new MappingException("Expected exactly 2 join columns for association [" + association.getName() + "] of entity: " + entity.getName());
-            } else {
-                String thisName = joinColumns.get(0).stringValue().orElseGet(() ->
-                        namingStrategy.mappedName(entity.getDecapitalizedName() + namingStrategy.getForeignKeySuffix())
-                );
-                String thatName = joinColumns.get(1).stringValue().orElseGet(() ->
-                        namingStrategy.mappedName(associatedEntity.getDecapitalizedName() + namingStrategy.getForeignKeySuffix())
-                );
-                joinColumnDefinitions = new String[] { thisName, thatName };
-            }
-        }
-        return joinColumnDefinitions;
     }
 
     @NonNull
@@ -1071,12 +1038,12 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                 final boolean escape = shouldEscape(associationOwner);
                 String mappedBy = association.getAnnotationMetadata().stringValue(Relation.class, "mappedBy").orElse(null);
 
+                String currentJoinAlias = joinAliases[i];
                 if (association.isForeignKey() && StringUtils.isEmpty(mappedBy)) {
                     PersistentProperty identity = associatedEntity.getIdentity();
                     if (identity == null) {
                         throw new IllegalArgumentException("Associated entity [" + associatedEntity.getName() + "] defines no ID. Cannot join.");
                     }
-
                     final PersistentProperty associatedId = associationOwner.getIdentity();
                     if (associatedId == null) {
                         throw new MappingException("Cannot join on entity [" + associationOwner.getName() + "] that has no declared ID");
@@ -1106,21 +1073,16 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                         ownerJoinTableColumns = ownerJoinTableColumns.stream().map(this::quote).collect(Collectors.toList());
                         associationJoinTableColumns = associationJoinTableColumns.stream().map(this::quote).collect(Collectors.toList());
                     }
-
                     String joinTableName = association.getAnnotationMetadata()
                             .stringValue(ANN_JOIN_TABLE, "name")
-                            .orElseGet(() ->
-                                    namingStrategy.mappedName(association)
-                            );
-
-//                    String[] joinColumnNames = resolveJoinTableColumns(associationOwner, associatedEntity, association, identity, associatedEntity.getIdentity(), namingStrategy);
-                    String joinTableAlias = joinAliases[i] + joinTableName + "_";
-                    joinTableName = escape ? quote(joinTableName) : joinTableName;
-
+                            .orElseGet(() -> namingStrategy.mappedName(association));
+                    String joinTableAlias = association.getAnnotationMetadata()
+                            .stringValue(ANN_JOIN_TABLE, "alias")
+                            .orElseGet(() -> currentJoinAlias + joinTableName + "_");
                     join(target,
                             queryState.getQueryModel(),
                             joinType,
-                            joinTableName,
+                            escape ? quote(joinTableName) : joinTableName,
                             joinTableAlias,
                             joinAlias,
                             ownerJoinColumns,
@@ -1131,7 +1093,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                             queryState.getQueryModel(),
                             joinType,
                             getTableName(associatedEntity),
-                            joinAliases[i],
+                            currentJoinAlias,
                             joinTableAlias,
                             associationJoinTableColumns,
                             associationJoinColumns
@@ -1141,7 +1103,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                         PersistentEntity associatedEntityOwner = findOwner(joinAssociationsPath, association).orElseGet(queryState::getEntity);
                         PersistentProperty ownerIdentity = associatedEntityOwner.getIdentity();
                         if (ownerIdentity == null) {
-                            throw new IllegalArgumentException("Associated entity l [" + associatedEntityOwner + "] defines no ID. Cannot join.");
+                            throw new IllegalArgumentException("Associated entity [" + associatedEntityOwner + "] defines no ID. Cannot join.");
                         }
                         PersistentProperty associatedProperty = associatedEntity.getPropertyByName(mappedBy);
                         if (associatedProperty == null) {
@@ -1153,7 +1115,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                                 associatedEntity,
                                 associationOwner,
                                 joinAlias,
-                                joinAliases[i],
+                                currentJoinAlias,
                                 joinAssociationsPath,
                                 ownerIdentity,
                                 Collections.emptyList(),
@@ -1161,7 +1123,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                     } else {
                         PersistentProperty associatedProperty = association.getAssociatedEntity().getIdentity();
                         if (associatedProperty == null) {
-                            throw new IllegalArgumentException("Associated entity r [" + association.getOwner().getName() + "] defines no ID. Cannot join.");
+                            throw new IllegalArgumentException("Associated entity [" + association.getOwner().getName() + "] defines no ID. Cannot join.");
                         }
                         join(target,
                                 joinType,
@@ -1169,14 +1131,14 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                                 associatedEntity,
                                 associationOwner,
                                 joinAlias,
-                                joinAliases[i],
+                                currentJoinAlias,
                                 joinAssociationsPath,
                                 association,
                                 Collections.emptyList(),
                                 associatedProperty);
                     }
                 }
-                joinAlias = joinAliases[i];
+                joinAlias = currentJoinAlias;
             }
             joinAssociationsPath.clear();
         }
@@ -1207,38 +1169,59 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
             );
             return;
         }
-
         final boolean escape = shouldEscape(associationOwner);
         List<String> onLeftColumns = new ArrayList<>();
-        traversePersistentProperties(leftProperty, (associations, p) -> {
-            String column = leftProperty.getOwner().getNamingStrategy().mappedName(merge(leftPropertyAssociations, associations), p);
-            if (escape) {
-                column = quote(column);
-            }
-            onLeftColumns.add(column);
-        });
-
-        if (onLeftColumns.isEmpty()) {
-            throw new MappingException("Cannot join on entity [" + leftProperty.getOwner().getName() + "] that has no declared ID");
-        }
-
         List<String> onRightColumns = new ArrayList<>();
-        traversePersistentProperties(rightProperty, (associations, p) -> {
-            String column = rightProperty.getOwner().getNamingStrategy().mappedName(merge(rightPropertyAssociations, associations), p);
-            if (escape) {
-                column = quote(column);
-            }
-            onRightColumns.add(column);
-        });
 
+        Association association = null;
+        if (leftProperty instanceof Association) {
+            association = (Association) leftProperty;
+        } else if (rightProperty instanceof Association) {
+            association = (Association) rightProperty;
+        }
+        if (association != null) {
+            Optional<Association> inverse = association.getInverseSide().map(Function.identity());
+            Association owner = inverse.orElse(association);
+            boolean isOwner = leftProperty == owner;
+            AnnotationValue<Annotation> joinColumnsHolder = owner.getAnnotationMetadata().getAnnotation(ANN_JOIN_COLUMNS);
+            if (joinColumnsHolder != null) {
+                onLeftColumns.addAll(
+                        joinColumnsHolder.getAnnotations("value")
+                        .stream()
+                        .map(ann -> ann.stringValue(isOwner ? "name" : "referencedColumnName").orElse(null))
+                        .collect(Collectors.toList())
+                );
+                onRightColumns.addAll(
+                        joinColumnsHolder.getAnnotations("value")
+                            .stream()
+                            .map(ann -> ann.stringValue(isOwner ? "referencedColumnName" : "name").orElse(null))
+                            .collect(Collectors.toList())
+                );
+            }
+        }
+        if (onLeftColumns.isEmpty()) {
+            traversePersistentProperties(leftProperty, (associations, p) -> {
+                String column = leftProperty.getOwner().getNamingStrategy().mappedName(merge(leftPropertyAssociations, associations), p);
+                onLeftColumns.add(column);
+            });
+            if (onLeftColumns.isEmpty()) {
+                throw new MappingException("Cannot join on entity [" + leftProperty.getOwner().getName() + "] that has no declared ID");
+            }
+        }
+        if (onRightColumns.isEmpty()) {
+            traversePersistentProperties(rightProperty, (associations, p) -> {
+                String column = rightProperty.getOwner().getNamingStrategy().mappedName(merge(rightPropertyAssociations, associations), p);
+                onRightColumns.add(column);
+            });
+        }
         join(sb,
                 queryState.getQueryModel(),
                 joinType,
                 getTableName(associatedEntity),
                 rightTableAlias,
                 leftTableAlias,
-                onLeftColumns,
-                onRightColumns
+                escape ? onLeftColumns.stream().map(this::quote).collect(Collectors.toList()) : onLeftColumns,
+                escape ? onRightColumns.stream().map(this::quote).collect(Collectors.toList()) : onRightColumns
         );
     }
 

@@ -42,4 +42,14 @@ public @interface JoinTable {
      * @return The join columns to use.
      */
     JoinColumn[] joinColumns() default {};
+
+    /**
+     * @return The inverse join columns to use.
+     */
+    JoinColumn[] inverseJoinColumns() default {};
+
+    /**
+     * @return The alias to use for the query
+     */
+    String alias() default "";
 }
