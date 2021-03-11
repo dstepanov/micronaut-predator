@@ -7,6 +7,7 @@ import io.micronaut.data.annotation.*
 import io.micronaut.data.jdbc.annotation.JdbcRepository
 import io.micronaut.data.jdbc.h2.H2DBProperties
 import io.micronaut.data.jdbc.h2.H2TestPropertyProvider
+import io.micronaut.data.model.Pageable
 import io.micronaut.data.model.query.QueryModel
 import io.micronaut.data.model.query.QueryParameter
 import io.micronaut.data.model.query.builder.QueryBuilder
@@ -194,6 +195,27 @@ class CompositeSpec extends Specification implements H2TestPropertyProvider {
                 settlement.description == "New settlement MODIFIED"
                 settlement.enabled
             }
+
+        when:
+            def settlements = settlementRepository.findAll(Pageable.from(0, 10))
+
+        then:
+            settlements.size() == 1
+            verifyAll(settlements[0]) {
+                settlement.id
+                settlement.id.code == "20010"
+                settlement.id.codeId == 9
+                settlement.id.county.countyName == "Czech Republic"
+                settlement.id.county.id
+                settlement.id.county.id.id == 44
+                settlement.id.county.id.state.id == 12
+                settlement.zone.id == 1
+                settlement.zone.name == "Danger"
+                settlement.settlementType.id == 1
+                settlement.settlementType.name == "Some"
+                settlement.description == "New settlement MODIFIED"
+                settlement.enabled
+            }
     }
 
     void "test build create Settlement"() {
@@ -358,6 +380,11 @@ interface SettlementRepository extends CrudRepository<Settlement, SettlementPk> 
     @Join(value = "zone", type = Join.Type.FETCH)
     @Join(value = "id.county", type = Join.Type.FETCH)
     Optional<Settlement> queryById(@NonNull SettlementPk settlementPk);
+
+    @Join(value = "settlementType", type = Join.Type.FETCH)
+    @Join(value = "zone", type = Join.Type.FETCH)
+    @Join(value = "id.county", type = Join.Type.FETCH)
+    List<Settlement> findAll(Pageable pageable);
 
 }
 
