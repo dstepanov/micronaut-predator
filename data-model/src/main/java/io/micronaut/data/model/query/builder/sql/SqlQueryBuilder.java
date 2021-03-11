@@ -244,9 +244,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
      * @param association The association
      * @return The join table insert statement
      */
-    public @NonNull String buildJoinTableInsert(
-            @NonNull PersistentEntity entity,
-            @NonNull Association association) {
+    public @NonNull String buildJoinTableInsert(@NonNull PersistentEntity entity, @NonNull Association association) {
         final AnnotationMetadata associationMetadata = association.getAnnotationMetadata();
         if (!isForeignKeyWithJoinTable(association)) {
             throw new IllegalArgumentException("Join table inserts can only be built for foreign key associations that are mapped with a join table.");
@@ -257,11 +255,12 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
                     .orElseGet(() ->
                             namingStrategy.mappedName(association)
                     );
-
-            List<String> leftJoinColumns = resolveJoinTableJoinColumns(association, entity, namingStrategy);
-            List<String> rightJoinColumns = resolveJoinTableJoinColumns(association, association.getAssociatedEntity(), namingStrategy);
-
-            String columns = Stream.concat(leftJoinColumns.stream(), rightJoinColumns.stream()).map(this::quote).collect(Collectors.joining(","));
+            List<String> leftJoinColumns = resolveJoinTableAssociatedColumns(association, entity, namingStrategy);
+            List<String> rightJoinColumns = resolveJoinTableAssociatedColumns(association, association.getAssociatedEntity(), namingStrategy);
+            boolean escape = shouldEscape(entity);
+            String columns = Stream.concat(leftJoinColumns.stream(), rightJoinColumns.stream())
+                    .map(columnName -> escape ? quote(columnName) : columnName)
+                    .collect(Collectors.joining(","));
             String placeholders = IntStream.range(0, leftJoinColumns.size() + rightJoinColumns.size()).mapToObj(i -> "?").collect(Collectors.joining(","));
             return INSERT_INTO + quote(joinTableName) + " (" + columns + ") VALUES (" + placeholders + ")";
         }
