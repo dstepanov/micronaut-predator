@@ -703,8 +703,7 @@ public class SqlQueryBuilder extends AbstractSqlLikeQueryBuilder implements Quer
     }
 
     private boolean canUseWildcardForSelect(PersistentEntity entity) {
-        return entity.getPersistentProperties()
-                .stream()
+        return Stream.concat(Stream.of(entity.getIdentity()), entity.getPersistentProperties().stream())
                 .flatMap(this::flatMapEmbedded)
                 .noneMatch(pp -> {
                     if (pp instanceof Association) {
